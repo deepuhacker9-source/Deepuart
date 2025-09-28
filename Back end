@@ -1,0 +1,1942 @@
+// package.json
+{
+  "name": "deepu-art-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Deepu Art e-commerce website",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^8.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "stripe": "^14.9.0",
+    "express-validator": "^7.0.1",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
+// server.js
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
+
+// Import routes
+const productRoutes = require('./routes/products');
+const cartRoutes = require('./routes/cart');
+const orderRoutes = require('./routes/orders');
+const authRoutes = require('./routes/auth');
+const paymentRoutes = require('./routes/payment');
+
+const app = express();
+
+// Security middleware
+app.use(helmet());
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
+app.use(limiter);
+
+// CORS configuration
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true
+}));
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('Connected to MongoDB Atlas'))
+.catch(err => console.error('MongoDB connection error:', err));
+
+// Routes
+app.use('/api/products', productRoutes);
+app.use('/api/cart', cartRoutes);
+app.use('/api/orders', orderRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/payment', paymentRoutes);
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'success',
+    message: 'Deepu Art API is running',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(err.status || 500).json({
+    status: 'error',
+    message: err.message || 'Internal Server Error',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+});
+
+// Handle 404 routes
+app.use('*', (req, res) => {
+  res.status(404).json({
+    status: 'error',
+    message: 'Route not found'
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// models/User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const userSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6
+  },
+  role: {
+    type: String,
+    enum: ['user', 'admin'],
+    default: 'user'
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true
+});
+
+// Hash password before saving
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 12);
+  next();
+});
+
+// Compare password method
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
+};
+
+module.exports = mongoose.model('User', userSchema);
+
+// models/Product.js
+const mongoose = require('mongoose');
+
+const productSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  description: {
+    type: String,
+    required: true
+  },
+  price: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  category: {
+    type: String,
+    required: true,
+    enum: ['paintings', 'creates', 'digital-print', 'sculptures']
+  },
+  stock: {
+    type: Number,
+    required: true,
+    min: 0,
+    default: 0
+  },
+  imageUrl: {
+    type: String,
+    required: true
+  },
+  featured: {
+    type: Boolean,
+    default: false
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true
+});
+
+// Add text index for search functionality
+productSchema.index({ 
+  name: 'text', 
+  description: 'text',
+  category: 'text'
+});
+
+module.exports = mongoose.model('Product', productSchema);
+
+// models/Cart.js
+const mongoose = require('mongoose');
+
+const cartItemSchema = new mongoose.Schema({
+  productId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true
+  },
+  quantity: {
+    type: Number,
+    required: true,
+    min: 1,
+    default: 1
+  }
+});
+
+const cartSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false // Allow guest carts
+  },
+  sessionId: {
+    type: String,
+    required: false // For guest users
+  },
+  items: [cartItemSchema],
+  totalAmount: {
+    type: Number,
+    default: 0
+  }
+}, {
+  timestamps: true
+});
+
+// Calculate total amount before saving
+cartSchema.pre('save', async function(next) {
+  if (this.items.length === 0) {
+    this.totalAmount = 0;
+    return next();
+  }
+
+  try {
+    await this.populate('items.productId');
+    this.totalAmount = this.items.reduce((total, item) => {
+      return total + (item.productId.price * item.quantity);
+    }, 0);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+module.exports = mongoose.model('Cart', cartSchema);
+
+// models/Order.js
+const mongoose = require('mongoose');
+
+const orderItemSchema = new mongoose.Schema({
+  productId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true
+  },
+  name: String,
+  price: Number,
+  quantity: {
+    type: Number,
+    required: true,
+    min: 1
+  }
+});
+
+const customerDetailsSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true
+  },
+  email: {
+    type: String,
+    required: true
+  },
+  phone: String,
+  address: {
+    street: String,
+    city: String,
+    state: String,
+    zipCode: String,
+    country: String
+  }
+});
+
+const orderSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false // Allow guest orders
+  },
+  orderNumber: {
+    type: String,
+    unique: true,
+    required: true
+  },
+  items: [orderItemSchema],
+  totalPrice: {
+    type: Number,
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['pending', 'processing', 'shipped', 'delivered', 'cancelled'],
+    default: 'pending'
+  },
+  customerDetails: customerDetailsSchema,
+  paymentStatus: {
+    type: String,
+    enum: ['pending', 'completed', 'failed', 'refunded'],
+    default: 'pending'
+  },
+  paymentIntentId: String,
+  shippingCost: {
+    type: Number,
+    default: 0
+  },
+  taxAmount: {
+    type: Number,
+    default: 0
+  }
+}, {
+  timestamps: true
+});
+
+// Generate order number before saving
+orderSchema.pre('save', function(next) {
+  if (!this.orderNumber) {
+    this.orderNumber = 'DA' + Date.now() + Math.random().toString(36).substr(2, 4).toUpperCase();
+  }
+  next();
+});
+
+module.exports = mongoose.model('Order', orderSchema);
+
+// middleware/auth.js
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+const authenticate = async (req, res, next) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'Access denied. No token provided.'
+      });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId).select('-password');
+    
+    if (!user || !user.isActive) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'Invalid token or user not found.'
+      });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(401).json({
+      status: 'error',
+      message: 'Invalid token.'
+    });
+  }
+};
+
+const isAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({
+      status: 'error',
+      message: 'Access denied. Admin privileges required.'
+    });
+  }
+};
+
+const optionalAuth = async (req, res, next) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const user = await User.findById(decoded.userId).select('-password');
+      
+      if (user && user.isActive) {
+        req.user = user;
+      }
+    }
+    
+    next();
+  } catch (error) {
+    // Continue without user if token is invalid
+    next();
+  }
+};
+
+module.exports = { authenticate, isAdmin, optionalAuth };
+
+// routes/auth.js
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const { body, validationResult } = require('express-validator');
+const User = require('../models/User');
+const { authenticate } = require('../middleware/auth');
+
+const router = express.Router();
+
+// Generate JWT token
+const generateToken = (userId) => {
+  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '7d' });
+};
+
+// Register user
+router.post('/register', [
+  body('name').trim().isLength({ min: 2 }).withMessage('Name must be at least 2 characters'),
+  body('email').isEmail().normalizeEmail().withMessage('Please provide a valid email'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { name, email, password } = req.body;
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'User with this email already exists'
+      });
+    }
+
+    // Create new user
+    const user = new User({ name, email, password });
+    await user.save();
+
+    const token = generateToken(user._id);
+
+    res.status(201).json({
+      status: 'success',
+      message: 'User registered successfully',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role
+        },
+        token
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error registering user',
+      error: error.message
+    });
+  }
+});
+
+// Login user
+router.post('/login', [
+  body('email').isEmail().normalizeEmail().withMessage('Please provide a valid email'),
+  body('password').notEmpty().withMessage('Password is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { email, password } = req.body;
+
+    // Find user and include password for comparison
+    const user = await User.findOne({ email, isActive: true });
+    if (!user) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check password
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'Invalid email or password'
+      });
+    }
+
+    const token = generateToken(user._id);
+
+    res.json({
+      status: 'success',
+      message: 'Login successful',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role
+        },
+        token
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error during login',
+      error: error.message
+    });
+  }
+});
+
+// Get current user profile
+router.get('/profile', authenticate, async (req, res) => {
+  res.json({
+    status: 'success',
+    data: {
+      user: {
+        id: req.user._id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role
+      }
+    }
+  });
+});
+
+module.exports = router;
+
+// routes/products.js
+const express = require('express');
+const { body, validationResult, query } = require('express-validator');
+const Product = require('../models/Product');
+const { authenticate, isAdmin } = require('../middleware/auth');
+
+const router = express.Router();
+
+// Get all products with filtering and pagination
+router.get('/', [
+  query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
+  query('category').optional().isIn(['paintings', 'creates', 'digital-print', 'sculptures']).withMessage('Invalid category'),
+  query('minPrice').optional().isFloat({ min: 0 }).withMessage('Min price must be a positive number'),
+  query('maxPrice').optional().isFloat({ min: 0 }).withMessage('Max price must be a positive number'),
+  query('search').optional().isLength({ min: 1 }).withMessage('Search term cannot be empty')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Build filter object
+    const filter = { isActive: true };
+
+    if (req.query.category) {
+      filter.category = req.query.category;
+    }
+
+    if (req.query.minPrice || req.query.maxPrice) {
+      filter.price = {};
+      if (req.query.minPrice) filter.price.$gte = parseFloat(req.query.minPrice);
+      if (req.query.maxPrice) filter.price.$lte = parseFloat(req.query.maxPrice);
+    }
+
+    if (req.query.search) {
+      filter.$text = { $search: req.query.search };
+    }
+
+    if (req.query.featured === 'true') {
+      filter.featured = true;
+    }
+
+    const products = await Product.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalProducts = await Product.countDocuments(filter);
+    const totalPages = Math.ceil(totalProducts / limit);
+
+    res.json({
+      status: 'success',
+      data: {
+        products,
+        pagination: {
+          currentPage: page,
+          totalPages,
+          totalProducts,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching products',
+      error: error.message
+    });
+  }
+});
+
+// Get single product
+router.get('/:id', async (req, res) => {
+  try {
+    const product = await Product.findOne({ _id: req.params.id, isActive: true });
+    
+    if (!product) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Product not found'
+      });
+    }
+
+    res.json({
+      status: 'success',
+      data: { product }
+    });
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid product ID'
+      });
+    }
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching product',
+      error: error.message
+    });
+  }
+});
+
+// Create product (Admin only)
+router.post('/', authenticate, isAdmin, [
+  body('name').trim().isLength({ min: 1 }).withMessage('Product name is required'),
+  body('description').trim().isLength({ min: 10 }).withMessage('Description must be at least 10 characters'),
+  body('price').isFloat({ min: 0 }).withMessage('Price must be a positive number'),
+  body('category').isIn(['paintings', 'creates', 'digital-print', 'sculptures']).withMessage('Invalid category'),
+  body('stock').isInt({ min: 0 }).withMessage('Stock must be a non-negative integer'),
+  body('imageUrl').isURL().withMessage('Image URL must be valid')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const product = new Product(req.body);
+    await product.save();
+
+    res.status(201).json({
+      status: 'success',
+      message: 'Product created successfully',
+      data: { product }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error creating product',
+      error: error.message
+    });
+  }
+});
+
+// Update product
+router.put('/:id', authenticate, isAdmin, [
+  body('name').optional().trim().isLength({ min: 1 }).withMessage('Product name cannot be empty'),
+  body('description').optional().trim().isLength({ min: 10 }).withMessage('Description must be at least 10 characters'),
+  body('price').optional().isFloat({ min: 0 }).withMessage('Price must be a positive number'),
+  body('category').optional().isIn(['paintings', 'creates', 'digital-print', 'sculptures']).withMessage('Invalid category'),
+  body('stock').optional().isInt({ min: 0 }).withMessage('Stock must be a non-negative integer'),
+  body('imageUrl').optional().isURL().withMessage('Image URL must be valid')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, isActive: true },
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Product not found'
+      });
+    }
+
+    res.json({
+      status: 'success',
+      message: 'Product updated successfully',
+      data: { product }
+    });
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid product ID'
+      });
+    }
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Error updating product',
+      error: error.message
+    });
+  }
+});
+
+// Delete product (Soft delete)
+router.delete('/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, isActive: true },
+      { isActive: false },
+      { new: true }
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Product not found'
+      });
+    }
+
+    res.json({
+      status: 'success',
+      message: 'Product deleted successfully'
+    });
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid product ID'
+      });
+    }
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Error deleting product',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;
+
+// routes/cart.js
+const express = require('express');
+const { body, validationResult } = require('express-validator');
+const Cart = require('../models/Cart');
+const Product = require('../models/Product');
+const { optionalAuth } = require('../middleware/auth');
+
+const router = express.Router();
+
+// Add item to cart
+router.post('/', optionalAuth, [
+  body('productId').isMongoId().withMessage('Invalid product ID'),
+  body('quantity').isInt({ min: 1 }).withMessage('Quantity must be at least 1'),
+  body('sessionId').optional().isString().withMessage('Session ID must be a string')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { productId, quantity, sessionId } = req.body;
+
+    // Verify product exists and is in stock
+    const product = await Product.findById(productId);
+    if (!product || !product.isActive) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Product not found'
+      });
+    }
+
+    if (product.stock < quantity) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Insufficient stock available'
+      });
+    }
+
+    // Find or create cart
+    let cart;
+    const cartQuery = req.user 
+      ? { userId: req.user._id }
+      : { sessionId: sessionId || 'guest' };
+
+    cart = await Cart.findOne(cartQuery);
+
+    if (!cart) {
+      cart = new Cart({
+        ...(req.user ? { userId: req.user._id } : { sessionId: sessionId || 'guest' }),
+        items: []
+      });
+    }
+
+    // Check if item already in cart
+    const existingItemIndex = cart.items.findIndex(
+      item => item.productId.toString() === productId
+    );
+
+    if (existingItemIndex > -1) {
+      // Update quantity
+      const newQuantity = cart.items[existingItemIndex].quantity + quantity;
+      
+      if (product.stock < newQuantity) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Insufficient stock for requested quantity'
+        });
+      }
+
+      cart.items[existingItemIndex].quantity = newQuantity;
+    } else {
+      // Add new item
+      cart.items.push({ productId, quantity });
+    }
+
+    await cart.save();
+    await cart.populate('items.productId');
+
+    res.json({
+      status: 'success',
+      message: 'Item added to cart successfully',
+      data: { cart }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error adding item to cart',
+      error: error.message
+    });
+  }
+});
+
+// Get cart for user or session
+router.get('/:identifier', optionalAuth, async (req, res) => {
+  try {
+    let cart;
+    const identifier = req.params.identifier;
+
+    if (req.user && req.user._id.toString() === identifier) {
+      // User's own cart
+      cart = await Cart.findOne({ userId: identifier }).populate('items.productId');
+    } else if (!req.user) {
+      // Guest cart by session ID
+      cart = await Cart.findOne({ sessionId: identifier }).populate('items.productId');
+    } else {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Access denied'
+      });
+    }
+
+    if (!cart) {
+      cart = {
+        items: [],
+        totalAmount: 0
+      };
+    }
+
+    res.json({
+      status: 'success',
+      data: { cart }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching cart',
+      error: error.message
+    });
+  }
+});
+
+// Remove item from cart
+router.delete('/:itemId', optionalAuth, async (req, res) => {
+  try {
+    const itemId = req.params.itemId;
+
+    // Find cart containing the item
+    let cart;
+    if (req.user) {
+      cart = await Cart.findOne({ userId: req.user._id });
+    } else {
+      // For guest users, need session ID in request body or headers
+      const sessionId = req.headers['x-session-id'] || req.body.sessionId;
+      if (!sessionId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Session ID required for guest users'
+        });
+      }
+      cart = await Cart.findOne({ sessionId });
+    }
+
+    if (!cart) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Cart not found'
+      });
+    }
+
+    // Remove item from cart
+    cart.items = cart.items.filter(item => item._id.toString() !== itemId);
+    await cart.save();
+    await cart.populate('items.productId');
+
+    res.json({
+      status: 'success',
+      message: 'Item removed from cart successfully',
+      data: { cart }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error removing item from cart',
+      error: error.message
+    });
+  }
+});
+
+// Update item quantity in cart
+router.put('/:itemId', optionalAuth, [
+  body('quantity').isInt({ min: 1 }).withMessage('Quantity must be at least 1')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const itemId = req.params.itemId;
+    const { quantity } = req.body;
+
+    // Find cart containing the item
+    let cart;
+    if (req.user) {
+      cart = await Cart.findOne({ userId: req.user._id });
+    } else {
+      const sessionId = req.headers['x-session-id'] || req.body.sessionId;
+      if (!sessionId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Session ID required for guest users'
+        });
+      }
+      cart = await Cart.findOne({ sessionId });
+    }
+
+    if (!cart) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Cart not found'
+      });
+    }
+
+    // Find and update item
+    const item = cart.items.find(item => item._id.toString() === itemId);
+    if (!item) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Item not found in cart'
+      });
+    }
+
+    // Check stock availability
+    const product = await Product.findById(item.productId);
+    if (!product || product.stock < quantity) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Insufficient stock available'
+      });
+    }
+
+    item.quantity = quantity;
+    await cart.save();
+    await cart.populate('items.productId');
+
+    res.json({
+      status: 'success',
+      message: 'Cart item updated successfully',
+      data: { cart }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error updating cart item',
+      error: error.message
+    });
+  }
+});
+
+// Clear cart
+router.delete('/clear/:identifier', optionalAuth, async (req, res) => {
+  try {
+    let cart;
+    const identifier = req.params.identifier;
+
+    if (req.user && req.user._id.toString() === identifier) {
+      cart = await Cart.findOne({ userId: identifier });
+    } else if (!req.user) {
+      cart = await Cart.findOne({ sessionId: identifier });
+    } else {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Access denied'
+      });
+    }
+
+    if (cart) {
+      cart.items = [];
+      cart.totalAmount = 0;
+      await cart.save();
+    }
+
+    res.json({
+      status: 'success',
+      message: 'Cart cleared successfully',
+      data: { cart: cart || { items: [], totalAmount: 0 } }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error clearing cart',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;
+
+// routes/orders.js
+const express = require('express');
+const { body, validationResult } = require('express-validator');
+const Order = require('../models/Order');
+const Cart = require('../models/Cart');
+const Product = require('../models/Product');
+const { authenticate, optionalAuth, isAdmin } = require('../middleware/auth');
+
+const router = express.Router();
+
+// Create new order
+router.post('/', optionalAuth, [
+  body('customerDetails.name').trim().isLength({ min: 2 }).withMessage('Customer name is required'),
+  body('customerDetails.email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  body('customerDetails.phone').optional().isMobilePhone().withMessage('Invalid phone number'),
+  body('customerDetails.address.street').trim().isLength({ min: 5 }).withMessage('Street address is required'),
+  body('customerDetails.address.city').trim().isLength({ min: 2 }).withMessage('City is required'),
+  body('customerDetails.address.state').trim().isLength({ min: 2 }).withMessage('State is required'),
+  body('customerDetails.address.zipCode').trim().isLength({ min: 5 }).withMessage('Valid zip code is required'),
+  body('customerDetails.address.country').trim().isLength({ min: 2 }).withMessage('Country is required'),
+  body('items').isArray({ min: 1 }).withMessage('Order must contain at least one item'),
+  body('totalPrice').isFloat({ min: 0 }).withMessage('Total price must be positive'),
+  body('sessionId').optional().isString()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { customerDetails, items, totalPrice, shippingCost = 0, taxAmount = 0, sessionId } = req.body;
+
+    // Validate items and check stock
+    let calculatedTotal = 0;
+    const orderItems = [];
+
+    for (const item of items) {
+      const product = await Product.findById(item.productId);
+      if (!product || !product.isActive) {
+        return res.status(400).json({
+          status: 'error',
+          message: `Product ${item.productId} not found`
+        });
+      }
+
+      if (product.stock < item.quantity) {
+        return res.status(400).json({
+          status: 'error',
+          message: `Insufficient stock for ${product.name}`
+        });
+      }
+
+      calculatedTotal += product.price * item.quantity;
+      orderItems.push({
+        productId: product._id,
+        name: product.name,
+        price: product.price,
+        quantity: item.quantity
+      });
+    }
+
+    // Validate total price (allowing for small rounding differences)
+    const expectedTotal = calculatedTotal + shippingCost + taxAmount;
+    if (Math.abs(expectedTotal - totalPrice) > 0.01) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Total price mismatch'
+      });
+    }
+
+    // Create order
+    const order = new Order({
+      userId: req.user?._id,
+      items: orderItems,
+      totalPrice,
+      customerDetails,
+      shippingCost,
+      taxAmount
+    });
+
+    await order.save();
+
+    // Update product stock
+    for (const item of items) {
+      await Product.findByIdAndUpdate(
+        item.productId,
+        { $inc: { stock: -item.quantity } }
+      );
+    }
+
+    // Clear user's cart
+    if (req.user) {
+      await Cart.findOneAndUpdate(
+        { userId: req.user._id },
+        { items: [], totalAmount: 0 }
+      );
+    } else if (sessionId) {
+      await Cart.findOneAndUpdate(
+        { sessionId },
+        { items: [], totalAmount: 0 }
+      );
+    }
+
+    await order.populate('items.productId');
+
+    res.status(201).json({
+      status: 'success',
+      message: 'Order created successfully',
+      data: { order }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error creating order',
+      error: error.message
+    });
+  }
+});
+
+// Get orders for user
+router.get('/user/:userId', authenticate, async (req, res) => {
+  try {
+    // Users can only access their own orders
+    if (req.user._id.toString() !== req.params.userId && req.user.role !== 'admin') {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Access denied'
+      });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const orders = await Order.find({ userId: req.params.userId })
+      .populate('items.productId')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalOrders = await Order.countDocuments({ userId: req.params.userId });
+
+    res.json({
+      status: 'success',
+      data: {
+        orders,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(totalOrders / limit),
+          totalOrders
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching orders',
+      error: error.message
+    });
+  }
+});
+
+// Get single order
+router.get('/:id', optionalAuth, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id).populate('items.productId');
+    
+    if (!order) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Order not found'
+      });
+    }
+
+    // Check access permissions
+    if (req.user) {
+      if (req.user.role !== 'admin' && 
+          order.userId && 
+          order.userId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          status: 'error',
+          message: 'Access denied'
+        });
+      }
+    }
+
+    res.json({
+      status: 'success',
+      data: { order }
+    });
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid order ID'
+      });
+    }
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching order',
+      error: error.message
+    });
+  }
+});
+
+// Update order status (Admin only)
+router.put('/:id', authenticate, isAdmin, [
+  body('status').isIn(['pending', 'processing', 'shipped', 'delivered', 'cancelled'])
+    .withMessage('Invalid status')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { status } = req.body;
+    
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true, runValidators: true }
+    ).populate('items.productId');
+
+    if (!order) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Order not found'
+      });
+    }
+
+    res.json({
+      status: 'success',
+      message: 'Order status updated successfully',
+      data: { order }
+    });
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid order ID'
+      });
+    }
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Error updating order',
+      error: error.message
+    });
+  }
+});
+
+// Get all orders (Admin only)
+router.get('/', authenticate, isAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+    if (req.query.paymentStatus) {
+      filter.paymentStatus = req.query.paymentStatus;
+    }
+
+    const orders = await Order.find(filter)
+      .populate('items.productId')
+      .populate('userId', 'name email')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalOrders = await Order.countDocuments(filter);
+
+    res.json({
+      status: 'success',
+      data: {
+        orders,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(totalOrders / limit),
+          totalOrders
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching orders',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;
+
+// routes/payment.js
+const express = require('express');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { body, validationResult } = require('express-validator');
+const Order = require('../models/Order');
+const { optionalAuth } = require('../middleware/auth');
+
+const router = express.Router();
+
+// Create payment intent
+router.post('/create-payment-intent', optionalAuth, [
+  body('amount').isFloat({ min: 0.5 }).withMessage('Amount must be at least $0.50'),
+  body('currency').optional().isLength({ min: 3, max: 3 }).withMessage('Invalid currency code'),
+  body('orderId').optional().isMongoId().withMessage('Invalid order ID')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { amount, currency = 'usd', orderId } = req.body;
+
+    // Convert amount to cents for Stripe
+    const amountInCents = Math.round(amount * 100);
+
+    // Create payment intent
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: currency.toLowerCase(),
+      metadata: {
+        orderId: orderId || 'guest_order',
+        userId: req.user?._id?.toString() || 'guest'
+      },
+      automatic_payment_methods: {
+        enabled: true,
+      },
+    });
+
+    // Update order with payment intent ID if order exists
+    if (orderId) {
+      await Order.findByIdAndUpdate(orderId, {
+        paymentIntentId: paymentIntent.id
+      });
+    }
+
+    res.json({
+      status: 'success',
+      data: {
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id
+      }
+    });
+  } catch (error) {
+    console.error('Payment intent creation error:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error creating payment intent',
+      error: error.message
+    });
+  }
+});
+
+// Confirm payment
+router.post('/confirm-payment', [
+  body('paymentIntentId').notEmpty().withMessage('Payment intent ID is required'),
+  body('orderId').optional().isMongoId().withMessage('Invalid order ID')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { paymentIntentId, orderId } = req.body;
+
+    // Retrieve payment intent from Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+    if (paymentIntent.status === 'succeeded') {
+      // Update order payment status
+      if (orderId) {
+        const order = await Order.findByIdAndUpdate(
+          orderId,
+          { 
+            paymentStatus: 'completed',
+            status: 'processing'
+          },
+          { new: true }
+        ).populate('items.productId');
+
+        res.json({
+          status: 'success',
+          message: 'Payment confirmed successfully',
+          data: { 
+            order,
+            paymentIntent: {
+              id: paymentIntent.id,
+              status: paymentIntent.status,
+              amount: paymentIntent.amount / 100
+            }
+          }
+        });
+      } else {
+        res.json({
+          status: 'success',
+          message: 'Payment confirmed successfully',
+          data: {
+            paymentIntent: {
+              id: paymentIntent.id,
+              status: paymentIntent.status,
+              amount: paymentIntent.amount / 100
+            }
+          }
+        });
+      }
+    } else {
+      res.status(400).json({
+        status: 'error',
+        message: 'Payment not completed',
+        data: {
+          paymentStatus: paymentIntent.status
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Payment confirmation error:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error confirming payment',
+      error: error.message
+    });
+  }
+});
+
+// Webhook endpoint for Stripe events
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    // Handle the event
+    switch (event.type) {
+      case 'payment_intent.succeeded':
+        const paymentIntent = event.data.object;
+        console.log('Payment succeeded:', paymentIntent.id);
+        
+        // Update order status if orderId is in metadata
+        if (paymentIntent.metadata.orderId && paymentIntent.metadata.orderId !== 'guest_order') {
+          await Order.findByIdAndUpdate(paymentIntent.metadata.orderId, {
+            paymentStatus: 'completed',
+            status: 'processing'
+          });
+        }
+        break;
+
+      case 'payment_intent.payment_failed':
+        const failedPayment = event.data.object;
+        console.log('Payment failed:', failedPayment.id);
+        
+        if (failedPayment.metadata.orderId && failedPayment.metadata.orderId !== 'guest_order') {
+          await Order.findByIdAndUpdate(failedPayment.metadata.orderId, {
+            paymentStatus: 'failed'
+          });
+        }
+        break;
+
+      default:
+        console.log(`Unhandled event type ${event.type}`);
+    }
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Webhook handler error:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Webhook handler failed'
+    });
+  }
+});
+
+// Get payment status
+router.get('/status/:paymentIntentId', async (req, res) => {
+  try {
+    const paymentIntent = await stripe.paymentIntents.retrieve(
+      req.params.paymentIntentId
+    );
+
+    res.json({
+      status: 'success',
+      data: {
+        paymentStatus: paymentIntent.status,
+        amount: paymentIntent.amount / 100,
+        currency: paymentIntent.currency
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error fetching payment status',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;
+
+// .env (Environment Variables Template)
+# Server Configuration
+NODE_ENV=development
+PORT=5000
+FRONTEND_URL=http://localhost:3000
+
+# Database
+MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.mongodb.net/deepu-art?retryWrites=true&w=majority
+
+# JWT Secret (Generate a strong random string)
+JWT_SECRET=your-super-secure-jwt-secret-key-here
+
+# Stripe Configuration
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key
+STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret
+
+# Optional: Razorpay for India (if using instead of Stripe)
+# RAZORPAY_KEY_ID=your_razorpay_key_id
+# RAZORPAY_KEY_SECRET=your_razorpay_key_secret
+
+// README.md
+# Deepu Art Backend API
+
+A complete Node.js + Express backend for the Deepu Art e-commerce website with MongoDB Atlas and Stripe payment integration.
+
+## Features
+
+- ✅ **Products API** - CRUD operations with filtering, pagination, and search
+- ✅ **Cart Management** - Add, update, remove items for users and guests
+- ✅ **Order System** - Create orders, track status, order history
+- ✅ **Authentication** - JWT-based user auth with admin roles
+- ✅ **Payment Integration** - Stripe payment processing with webhooks
+- ✅ **Security** - Rate limiting, CORS, input validation, helmet
+- ✅ **Database** - MongoDB with Mongoose ODM
+- ✅ **Error Handling** - Comprehensive error handling and validation
+
+## Setup Instructions
+
+### 1. Clone and Install Dependencies
+
+```bash
+npm install
+```
+
+### 2. Environment Configuration
+
+Create a `.env` file in the root directory with the following variables:
+
+```env
+NODE_ENV=development
+PORT=5000
+FRONTEND_URL=http://localhost:3000
+MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.mongodb.net/deepu-art
+JWT_SECRET=your-super-secure-jwt-secret-key-here
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key
+STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret
+```
+
+### 3. MongoDB Atlas Setup
+
+1. Create a MongoDB Atlas account at [mongodb.com/cloud/atlas](https://mongodb.com/cloud/atlas)
+2. Create a new cluster
+3. Create a database user with read/write permissions
+4. Get the connection string and replace `<username>` and `<password>`
+5. Add your IP address to the network access list
+
+### 4. Stripe Setup
+
+1. Create a Stripe account at [stripe.com](https://stripe.com)
+2. Get your test API keys from the dashboard
+3. Set up a webhook endpoint pointing to `your-domain.com/api/payment/webhook`
+4. Copy the webhook secret to your `.env` file
+
+### 5. Start the Server
+
+```bash
+# Development mode with nodemon
+npm run dev
+
+# Production mode
+npm start
+```
+
+The server will start on `http://localhost:5000` (or your specified PORT).
+
+## API Documentation
+
+### Authentication Endpoints
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/api/auth/register` | Register new user | No |
+| POST | `/api/auth/login` | Login user | No |
+| GET | `/api/auth/profile` | Get user profile | Yes |
+
+### Products Endpoints
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/api/products` | Get all products | No |
+| GET | `/api/products/:id` | Get single product | No |
+| POST | `/api/products` | Create product | Admin |
+| PUT | `/api/products/:id` | Update product | Admin |
+| DELETE | `/api/products/:id` | Delete product | Admin |
+
+### Cart Endpoints
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/api/cart` | Add item to cart | Optional |
+| GET | `/api/cart/:identifier` | Get cart | Optional |
+| PUT | `/api/cart/:itemId` | Update cart item | Optional |
+| DELETE | `/api/cart/:itemId` | Remove cart item | Optional |
+| DELETE | `/api/cart/clear/:identifier` | Clear cart | Optional |
+
+### Orders Endpoints
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/api/orders` | Create new order | Optional |
+| GET | `/api/orders` | Get all orders | Admin |
+| GET | `/api/orders/:id` | Get single order | Optional |
+| GET | `/api/orders/user/:userId` | Get user orders | Yes |
+| PUT | `/api/orders/:id` | Update order status | Admin |
+
+### Payment Endpoints
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/api/payment/create-payment-intent` | Create payment | Optional |
+| POST | `/api/payment/confirm-payment` | Confirm payment | No |
+| POST | `/api/payment/webhook` | Stripe webhook | No |
+| GET | `/api/payment/status/:id` | Get payment status | No |
+
+## Database Models
+
+### User Schema
+```javascript
+{
+  name: String,
+  email: String (unique),
+  password: String (hashed),
+  role: String (user/admin),
+  isActive: Boolean
+}
+```
+
+### Product Schema
+```javascript
+{
+  name: String,
+  description: String,
+  price: Number,
+  category: String,
+  stock: Number,
+  imageUrl: String,
+  featured: Boolean,
+  isActive: Boolean
+}
+```
+
+### Cart Schema
+```javascript
+{
+  userId: ObjectId (optional),
+  sessionId: String (for guests),
+  items: [{
+    productId: ObjectId,
+    quantity: Number
+  }],
+  totalAmount: Number
+}
+```
+
+### Order Schema
+```javascript
+{
+  userId: ObjectId (optional),
+  orderNumber: String,
+  items: [{
+    productId: ObjectId,
+    name: String,
+    price: Number,
+    quantity: Number
+  }],
+  totalPrice: Number,
+  status: String,
+  customerDetails: {
+    name: String,
+    email: String,
+    phone: String,
+    address: Object
+  },
+  paymentStatus: String,
+  paymentIntentId: String
+}
+```
+
+## Frontend Integration
+
+### Setting up API calls in React
+
+```javascript
+// api/config.js
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+
+export const apiRequest = async (endpoint, options = {}) => {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const token = localStorage.getItem('token');
+  
+  const config = {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token && { Authorization: `Bearer ${token}` }),
+      ...options.headers,
+    },
+    ...options,
+  };
+
+  const response = await fetch(url, config);
+  const data = await response.json();
+  
+  if (!response.ok) {
+    throw new Error(data.message || 'Something went wrong');
+  }
+  
+  return data;
+};
+
+// Example usage in React
+export const getProducts = () => apiRequest('/products');
+export const addToCart = (item) => apiRequest('/cart', {
+  method: 'POST',
+  body: JSON.stringify(item)
+});
+```
+
+## Security Features
+
+- **CORS** - Cross-origin requests properly configured
+- **Rate Limiting** - 100 requests per 15 minutes per IP
+- **Helmet** - Sets various HTTP headers for security
+- **Input Validation** - All inputs validated with express-validator
+- **Password Hashing** - bcryptjs for secure password storage
+- **JWT Tokens** - Secure authentication with expiration
+- **Environment Variables** - Sensitive data stored securely
+
+## Deployment
+
+### Deploy to Render
+
+1. Push code to GitHub
+2. Create account on [render.com](https://render.com)
+3. Create new Web Service
+4. Connect GitHub repository
+5. Set environment variables in Render dashboard
+6. Deploy
+
+### Deploy to Railway
+
+1. Install Railway CLI: `npm install -g @railway/cli`
+2. Login: `railway login`
+3. Initialize: `railway init`
+4. Set environment variables: `railway variables:set KEY=value`
+5. Deploy: `railway up`
+
+## Testing the API
+
+You can test the API using tools like Postman, Insomnia, or curl:
+
+```bash
+# Test health endpoint
+curl http://localhost:5000/api/health
+
+# Get products
+curl http://localhost:5000/api/products
+
+# Register user
+curl -X POST http://localhost:5000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test User","email":"test@example.com","password":"password123"}'
+```
+
+## Support
+
+For issues and questions:
+- Check the API response messages for detailed error information
+- Ensure all environment variables are properly set
+- Check MongoDB Atlas network access and connection string
+- Verify Stripe webhook endpoint is correctly configured
+
+## License
+
+MIT License - feel free to use this code for your projects!
